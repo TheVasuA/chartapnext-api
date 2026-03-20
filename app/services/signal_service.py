@@ -45,7 +45,7 @@ async def save_and_publish(result: dict, db: AsyncSession) -> Signal:
         **result,
         "id":       record.id,
         "interval": settings.KLINE_INTERVAL,
-        "timestamp": record.created_at.isoformat(),
+        "timestamp": record.created_at.isoformat() + "Z",  # explicit UTC so browsers parse correctly
     }
 
     redis = await get_redis()
