@@ -34,10 +34,15 @@ celery_app.conf.update(
     timezone          = "UTC",
     enable_utc        = True,
     beat_schedule     = {
-        # Fallback full refresh every 60 seconds
+        # RSI/MACD/BB signals every 60 s
         "refresh-all-signals-every-minute": {
             "task":     "app.tasks.signal_tasks.refresh_all_signals",
             "schedule": 60.0,
+        },
+        # SMC multi-timeframe signals every 5 minutes (15M timeframe)
+        "refresh-all-smc-every-5-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_all_smc",
+            "schedule": 300.0,
         },
     },
 )
@@ -87,6 +92,39 @@ def refresh_all_signals(self):
     except Exception as exc:
         logger.error("refresh_all_signals failed: %s", exc)
         raise self.retry(exc=exc, countdown=10)
+
+
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_all_smc",
+    bind=True,
+    max_retries=3,
+)
+def refresh_all_smc(self):
+    """Recompute SMC analysis for all symbols and cache results in Redis."""
+    from app.redis_client import get_redis
+    from app.services.smc_strategy import run_smc_strategy
+    from app.utils.symbols import SYMBOLS
+    import json
+
+    async def _compute_all():
+        redis = await get_redis()
+        for symbol in SYMBOLS:
+            try:
+                result = await run_smc_strategy(symbol)
+                if result:
+                    await redis.set(
+                        f"smc:{symbol}",
+                        json.dumps(result),
+                        ex=600,   # 10 min TTL
+                    )
+            except Exception as exc:
+                logger.error("Error computing SMC for %s: %s", symbol, exc)
+
+    try:
+        _run(_compute_all())
+    except Exception as exc:
+        logger.error("refresh_all_smc failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)
 
 
 @celery_app.task(name="app.tasks.signal_tasks.refresh_signal")

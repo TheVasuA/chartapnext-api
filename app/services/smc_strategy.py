@@ -53,44 +53,64 @@ def trend_4h(df: pd.DataFrame) -> tuple[str, float | None, float | None]:
 
 
 def liquidity_sweep(df: pd.DataFrame) -> Optional[str]:
-    """Detect liquidity sweep on the most recent 1H candle."""
-    if len(df) < 2:
+    """Detect liquidity sweep on the most recent 1H candle.
+
+    Uses the swing high/low of the previous 5 candles (not just 1) so the
+    detection is more reliable and fires more frequently.
+    """
+    if len(df) < 6:
         return None
-    prev = df.iloc[-2]
-    last = df.iloc[-1]
-    prev_high = safe_float(prev["high"])
-    prev_low  = safe_float(prev["low"])
-    last_high = safe_float(last["high"])
-    last_low  = safe_float(last["low"])
+
+    # Swing levels from the prior 5 candles (excluding the last candle)
+    lookback   = df.iloc[-6:-1]
+    swing_high = safe_float(lookback["high"].max())
+    swing_low  = safe_float(lookback["low"].min())
+
+    last       = df.iloc[-1]
+    last_high  = safe_float(last["high"])
+    last_low   = safe_float(last["low"])
     last_close = safe_float(last["close"])
+    last_open  = safe_float(last["open"])
 
-    if None in (prev_high, prev_low, last_high, last_low, last_close):
+    if None in (swing_high, swing_low, last_high, last_low, last_close, last_open):
         return None
 
-    # Swept below previous low then recovered → bullish sweep (smart money took lows)
-    if last_low < prev_low and last_close > prev_low:
+    # Bullish sweep: wick pierced below swing low AND candle closed bullish
+    if last_low < swing_low and last_close > last_open:
         return "bullish_sweep"
 
-    # Swept above previous high then reversed → bearish sweep (smart money took highs)
-    if last_high > prev_high and last_close < prev_high:
+    # Bearish sweep: wick pierced above swing high AND candle closed bearish
+    if last_high > swing_high and last_close < last_open:
+        return "bearish_sweep"
+
+    # Relaxed: wick touched swing level (within 0.1%) even without close-back
+    tolerance = 0.001
+    if last_low <= swing_low * (1 + tolerance) and last_close > last_open:
+        return "bullish_sweep"
+    if last_high >= swing_high * (1 - tolerance) and last_close < last_open:
         return "bearish_sweep"
 
     return None
 
 
 def entry_confirmation(df: pd.DataFrame, trend: str, sweep: Optional[str]) -> Optional[str]:
-    """15M engulfing candle in direction of trend + sweep."""
+    """15M entry: last 3 candles majority in direction of trend + sweep."""
     if sweep is None:
         return None
-    last  = df.iloc[-1]
-    open_ = safe_float(last["open"])
-    close = safe_float(last["close"])
-    if open_ is None or close is None:
+    if len(df) < 3:
         return None
 
-    if trend == "bullish" and sweep == "bullish_sweep" and close > open_:
+    # Check most recent 3 candles — majority must close in signal direction
+    recent = df.iloc[-3:]
+    bull_candles = sum(1 for _, r in recent.iterrows()
+                       if safe_float(r["close"]) is not None
+                       and safe_float(r["open"]) is not None
+                       and safe_float(r["close"]) > safe_float(r["open"]))
+    bear_candles = 3 - bull_candles
+
+    if trend == "bullish" and sweep == "bullish_sweep" and bull_candles >= 2:
         return "LONG"
-    if trend == "bearish" and sweep == "bearish_sweep" and close < open_:
+    if trend == "bearish" and sweep == "bearish_sweep" and bear_candles >= 2:
         return "SHORT"
     return None
 
