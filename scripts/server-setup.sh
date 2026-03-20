@@ -46,7 +46,7 @@ fi
 if [ ! -f ".env" ]; then
   cat > .env <<'EOF'
 SECRET_KEY=CHANGE_ME_STRONG_SECRET_KEY_HERE
-ALLOWED_ORIGINS=https://yourdomain.com,http://localhost:3000
+ALLOWED_ORIGINS=http://109.123.247.224,http://109.123.247.224:3000,http://localhost:3000
 DATABASE_URL=postgresql+asyncpg://chartap:chartap@db:5432/chartap
 REDIS_URL=redis://redis:6379/0
 CELERY_BROKER_URL=redis://redis:6379/1
@@ -68,7 +68,7 @@ echo ""
 cat > /etc/nginx/sites-available/chartapnext-api <<'EOF'
 server {
     listen 80;
-    server_name _;
+    server_name 109.123.247.224;
 
     location / {
         proxy_pass http://127.0.0.1:8000;
