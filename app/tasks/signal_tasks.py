@@ -34,6 +34,11 @@ celery_app.conf.update(
             "task":     "app.tasks.signal_tasks.refresh_all_smc",
             "schedule": 300.0,
         },
+        # RSI pullback signals every 5 minutes
+        "refresh-all-rsi-every-5-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_all_rsi",
+            "schedule": 300.0,
+        },
     },
 )
 
@@ -85,6 +90,39 @@ def refresh_all_smc(self):
         _run(_compute_all())
     except Exception as exc:
         logger.error("refresh_all_smc failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)
+
+
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_all_rsi",
+    bind=True,
+    max_retries=3,
+)
+def refresh_all_rsi(self):
+    """Recompute RSI pullback analysis for all symbols and cache results."""
+    from app.redis_client import get_redis
+    from app.services.rsi_strategy import run_rsi_strategy
+    from app.utils.symbols import SYMBOLS
+    import json
+
+    async def _compute_all():
+        redis = await get_redis()
+        for symbol in SYMBOLS:
+            try:
+                result = await run_rsi_strategy(symbol)
+                if result:
+                    await redis.set(
+                        f"rsi:{symbol}",
+                        json.dumps(result),
+                        ex=600,
+                    )
+            except Exception as exc:
+                logger.error("Error computing RSI for %s: %s", symbol, exc)
+
+    try:
+        _run(_compute_all())
+    except Exception as exc:
+        logger.error("refresh_all_rsi failed: %s", exc)
         raise self.retry(exc=exc, countdown=15)
 
 
