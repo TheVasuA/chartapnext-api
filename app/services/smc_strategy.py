@@ -59,10 +59,10 @@ def liquidity_sweep(df: pd.DataFrame) -> Optional[str]:
     the previous 10 candles before it.  The most recent sweep direction wins.
     Tolerance is 0.5 % so near-touches count.
     """
-    if len(df) < 12:
+    if len(df) < 20:
         return None
 
-    tolerance = 0.005  # 0.5 %
+    tolerance = 0.0005  # 0.05 %
     last_sweep = None
 
     # Slide a window: for each of the last 5 candles, check against prior 10
@@ -168,12 +168,12 @@ async def run_smc_strategy(symbol: str) -> Optional[dict]:
     entry  = entry_confirmation(df_15m, trend, sweep)
 
     # Signal decision:
-    #   LONG  — 4H bullish trend + 1H bullish sweep (15M confirmation is bonus)
-    #   SHORT — 4H bearish trend + 1H bearish sweep
-    #   WAIT  — trend and sweep don't align, or no sweep detected
-    if trend == "bullish" and sweep == "bullish_sweep":
+    #   LONG  — 4H bullish trend + 1H bullish sweep + 15M LONG confirmation
+    #   SHORT — 4H bearish trend + 1H bearish sweep + 15M SHORT confirmation
+    #   WAIT  — any condition missing or misaligned
+    if trend == "bullish" and sweep == "bullish_sweep" and entry == "LONG":
         signal = "LONG"
-    elif trend == "bearish" and sweep == "bearish_sweep":
+    elif trend == "bearish" and sweep == "bearish_sweep" and entry == "SHORT":
         signal = "SHORT"
     else:
         signal = "WAIT"

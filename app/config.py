@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     SIGNAL_CACHE_TTL: int = 120
     OHLCV_MAX_CANDLES: int = 200
     # Plain str — avoids pydantic-settings v2 JSON-parsing List fields from env
-    ALLOWED_ORIGINS: str = "http://localhost:3000,https://www.chartap.com,https://chartap.com"
+    ALLOWED_ORIGINS: str = "http://localhost:3000"
 
     @property
     def allowed_origins_list(self) -> list[str]:

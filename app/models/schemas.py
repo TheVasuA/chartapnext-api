@@ -10,9 +10,6 @@ class SignalOut(BaseModel):
     symbol:      str
     signal:      SignalType
     price:       float
-    rsi:         float | None = None
-    macd:        float | None = None
-    macd_signal: float | None = None
     bb_upper:    float | None = None
     bb_lower:    float | None = None
     interval:    str
@@ -26,9 +23,6 @@ class SignalLive(BaseModel):
     symbol:      str
     signal:      SignalType
     price:       float | None = None
-    rsi:         float | None = None
-    macd:        float | None = None
-    macd_signal: float | None = None
     bb_upper:    float | None = None
     bb_lower:    float | None = None
     interval:    str

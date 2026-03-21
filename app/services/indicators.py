@@ -2,8 +2,6 @@
 Technical indicators computed with pandas_ta.
 
 Indicators computed:
-  • RSI  (14)
-  • MACD (12, 26, 9)
   • Bollinger Bands (20, 2σ)
   • EMA 20 / EMA 50
 """
@@ -28,14 +26,6 @@ def build_dataframe(candles: List[dict]) -> pd.DataFrame:
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df["rsi"] = ta.rsi(df["close"], length=14)
-
-    macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-    if macd is not None:
-        df["macd"]       = macd.get("MACD_12_26_9")
-        df["macd_signal"] = macd.get("MACDs_12_26_9")
-        df["macd_hist"]  = macd.get("MACDh_12_26_9")
-
     bb = ta.bbands(df["close"], length=20, std=2)
     if bb is not None:
         df["bb_upper"] = bb.get("BBU_20_2.0")

@@ -1,145 +1,143 @@
 #!/bin/bash
-# Run this ONCE on your Contabo server as root
-# Usage: bash server-setup.sh
+# SSL Setup for Chartapnext API
+# Usage:  bash ssl-setup.sh [domain.com]   → Let's Encrypt (requires a domain)
+#         bash ssl-setup.sh --self-signed   → self-signed cert (IP / dev)
 set -e
 
 SERVER_IP="109.123.247.224"
-REPO_URL="https://github.com/TheVasuA/chartapnext-api.git"
 DEPLOY_DIR="/opt/chartapnext-api"
+NGINX_CONF="/etc/nginx/sites-available/chartapnext-api"
 
+# ──────────────────────────────────────────────
+# Parse arguments
+# ──────────────────────────────────────────────
+MODE=""
+DOMAIN=""
+
+if [[ "$1" == "--self-signed" ]]; then
+    MODE="self-signed"
+elif [[ -n "$1" ]]; then
+    MODE="letsencrypt"
+    DOMAIN="$1"
+else
+    echo ""
+    echo "Usage:"
+    echo "  bash ssl-setup.sh example.com          → Let's Encrypt (recommended)"
+    echo "  bash ssl-setup.sh --self-signed         → self-signed cert (IP/dev)"
+    echo ""
+    read -rp "Enter domain name (or leave blank for self-signed): " DOMAIN
+    if [[ -z "$DOMAIN" ]]; then
+        MODE="self-signed"
+    else
+        MODE="letsencrypt"
+    fi
+fi
+
+echo ""
 echo "================================================"
-echo " Chartapnext API — Contabo Server Setup"
-echo " Server: $SERVER_IP"
+echo " Chartapnext API — SSL Setup"
+echo " Mode   : $MODE"
+echo " Target : ${DOMAIN:-$SERVER_IP}"
 echo "================================================"
 echo ""
 
 # ──────────────────────────────────────────────
-# 1. UBUNTU — Full system update & hardening
+# 1. Install required packages
 # ──────────────────────────────────────────────
-echo "[1/7] Updating Ubuntu..."
-apt-get update -y
-apt-get upgrade -y
-apt-get dist-upgrade -y
-apt-get autoremove -y
-apt-get autoclean -y
+echo "[1/4] Installing packages..."
+apt-get update -y -q
+apt-get install -y -q nginx openssl
 
-echo ">>> Ubuntu updated: $(lsb_release -d | cut -f2)"
+if [[ "$MODE" == "letsencrypt" ]]; then
+    apt-get install -y -q certbot python3-certbot-nginx
+fi
 
-# Enable automatic security updates
-echo "[1b] Enabling unattended security upgrades..."
-apt-get install -y unattended-upgrades
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-APT::Periodic::AutocleanInterval "7";
-EOF
-echo ">>> Auto security upgrades enabled"
+echo ">>> Packages ready"
 
 # ──────────────────────────────────────────────
-# 2. FIREWALL — Allow only needed ports
+# 2. Obtain / generate certificate
 # ──────────────────────────────────────────────
-echo "[2/7] Configuring UFW firewall..."
-apt-get install -y ufw
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp    # SSH
-ufw allow 80/tcp    # HTTP (nginx → api)
-ufw allow 443/tcp   # HTTPS (future SSL)
-ufw --force enable
-echo ">>> UFW status:"
-ufw status verbose
+echo "[2/4] Obtaining SSL certificate..."
 
-# ──────────────────────────────────────────────
-# 3. INSTALL — Required packages
-# ──────────────────────────────────────────────
-echo "[3/7] Installing dependencies..."
-apt-get install -y \
-  ca-certificates curl gnupg lsb-release \
-  git nginx htop net-tools
+if [[ "$MODE" == "letsencrypt" ]]; then
+    # --------------------------------------------------
+    # Let's Encrypt via Certbot
+    # --------------------------------------------------
+    echo ">>> Running Certbot for $DOMAIN ..."
+    certbot --nginx \
+        -d "$DOMAIN" \
+        --non-interactive \
+        --agree-tos \
+        --register-unsafely-without-email \
+        --redirect
 
-# ──────────────────────────────────────────────
-# 4. DOCKER — Install latest stable
-# ──────────────────────────────────────────────
-echo "[4/7] Installing Docker..."
+    CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+    KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
-# Remove old docker versions if any
-for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-  apt-get remove -y $pkg 2>/dev/null || true
-done
+    # Auto-renew cron (certbot installs a systemd timer, but add cron as backup)
+    (crontab -l 2>/dev/null | grep -v certbot; \
+     echo "0 3 * * * certbot renew --quiet && systemctl reload nginx") | crontab -
+    echo ">>> Let's Encrypt certificate obtained. Auto-renew cron added."
 
-# Add Docker's official GPG key
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
-  gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-
-# Add Docker apt repository
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-apt-get update
-apt-get install -y \
-  docker-ce \
-  docker-ce-cli \
-  containerd.io \
-  docker-buildx-plugin \
-  docker-compose-plugin
-
-# Enable and start Docker
-systemctl enable docker
-systemctl start docker
-
-echo ">>> Docker installed: $(docker --version)"
-echo ">>> Docker Compose installed: $(docker compose version)"
-
-# ──────────────────────────────────────────────
-# 5. CLONE — Deploy directory & repo
-# ──────────────────────────────────────────────
-echo "[5/7] Setting up deploy directory..."
-mkdir -p $DEPLOY_DIR
-cd $DEPLOY_DIR
-
-if [ ! -d ".git" ]; then
-  git clone "$REPO_URL" .
-  echo ">>> Repo cloned"
 else
-  git pull origin main
-  echo ">>> Repo updated"
+    # --------------------------------------------------
+    # Self-signed certificate (IP / dev / no domain)
+    # --------------------------------------------------
+    CERT_DIR="/etc/ssl/chartapnext"
+    mkdir -p "$CERT_DIR"
+    CERT_PATH="$CERT_DIR/cert.pem"
+    KEY_PATH="$CERT_DIR/key.pem"
+
+    echo ">>> Generating self-signed certificate for IP: $SERVER_IP ..."
+    openssl req -x509 -nodes -newkey rsa:4096 -days 365 \
+        -keyout "$KEY_PATH" \
+        -out    "$CERT_PATH" \
+        -subj   "/C=US/ST=State/L=City/O=Chartapnext/CN=$SERVER_IP" \
+        -addext "subjectAltName=IP:$SERVER_IP"
+
+    chmod 600 "$KEY_PATH"
+    echo ">>> Self-signed certificate created (valid 365 days)"
+    echo "    NOTE: Browsers will show a security warning — add an exception."
 fi
 
 # ──────────────────────────────────────────────
-# 6. ENV — Create .env template
+# 3. Write Nginx config with SSL
 # ──────────────────────────────────────────────
-echo "[6/7] Creating .env template..."
-if [ ! -f ".env" ]; then
-  cat > .env <<EOF
-SECRET_KEY=CHANGE_ME_STRONG_SECRET_KEY_HERE
-ALLOWED_ORIGINS=https://www.chartap.com,https://chartap.com,http://localhost:3000
-DATABASE_URL=postgresql+asyncpg://chartap:chartap@db:5432/chartap
-REDIS_URL=redis://redis:6379/0
-CELERY_BROKER_URL=redis://redis:6379/1
-CELERY_RESULT_BACKEND=redis://redis:6379/2
-EOF
-  echo ">>> .env created — EDIT $DEPLOY_DIR/.env before starting containers!"
-else
-  echo ">>> .env already exists — skipping"
-fi
+echo "[3/4] Writing Nginx HTTPS config..."
 
-# ──────────────────────────────────────────────
-# 7. NGINX — Reverse proxy config
-# ──────────────────────────────────────────────
-echo "[7/7] Configuring Nginx reverse proxy..."
-cat > /etc/nginx/sites-available/chartapnext-api <<EOF
+SERVER_NAME="${DOMAIN:-$SERVER_IP}"
+
+cat > "$NGINX_CONF" <<EOF
+# HTTP → HTTPS redirect
 server {
     listen 80;
-    server_name ${SERVER_IP};
+    listen [::]:80;
+    server_name ${SERVER_NAME};
+    return 301 https://\$host\$request_uri;
+}
+
+# HTTPS
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate     ${CERT_PATH};
+    ssl_certificate_key ${KEY_PATH};
+
+    # Modern TLS only
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
 
     # Security headers
-    add_header X-Frame-Options SAMEORIGIN;
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     location / {
         proxy_pass http://127.0.0.1:8000;
@@ -157,41 +155,56 @@ server {
 }
 EOF
 
-ln -sf /etc/nginx/sites-available/chartapnext-api /etc/nginx/sites-enabled/chartapnext-api
+ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/chartapnext-api
 rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl enable nginx && systemctl reload nginx
-echo ">>> Nginx configured"
+
+nginx -t
+systemctl reload nginx
+echo ">>> Nginx reloaded with SSL"
+
+# ──────────────────────────────────────────────
+# 4. Update .env ALLOWED_ORIGINS → https://
+# ──────────────────────────────────────────────
+echo "[4/4] Updating ALLOWED_ORIGINS in .env..."
+
+HTTPS_ORIGIN="https://${SERVER_NAME}"
+
+if grep -q "^ALLOWED_ORIGINS=" "$DEPLOY_DIR/.env"; then
+    # Build new value: keep existing origins + add https version
+    CURRENT=$(grep "^ALLOWED_ORIGINS=" "$DEPLOY_DIR/.env" | cut -d= -f2-)
+    # Add https origin if not already present
+    if echo "$CURRENT" | grep -q "$HTTPS_ORIGIN"; then
+        echo ">>> ALLOWED_ORIGINS already contains $HTTPS_ORIGIN — no change"
+    else
+        NEW_ORIGINS="${HTTPS_ORIGIN},${CURRENT}"
+        sed -i "s|^ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=${NEW_ORIGINS}|" "$DEPLOY_DIR/.env"
+        echo ">>> ALLOWED_ORIGINS updated: $NEW_ORIGINS"
+    fi
+else
+    echo "ALLOWED_ORIGINS=${HTTPS_ORIGIN},http://${SERVER_IP},http://localhost:3000" >> "$DEPLOY_DIR/.env"
+    echo ">>> ALLOWED_ORIGINS added"
+fi
+
+# Restart API container to pick up new ALLOWED_ORIGINS
+echo ">>> Restarting API container..."
+cd "$DEPLOY_DIR" && docker compose up -d --build api
 
 # ──────────────────────────────────────────────
 # DONE
 # ──────────────────────────────────────────────
 echo ""
 echo "================================================"
-echo " Setup Complete!"
+echo " SSL Setup Complete!"
 echo "================================================"
 echo ""
-echo "NEXT STEPS:"
+if [[ "$MODE" == "letsencrypt" ]]; then
+    echo "  API (HTTPS) : https://${DOMAIN}/health"
+    echo "  API Docs    : https://${DOMAIN}/docs"
+    echo "  Auto-renew  : certbot renew (cron @ 3am daily)"
+else
+    echo "  API (HTTPS) : https://${SERVER_IP}/health"
+    echo "  API Docs    : https://${SERVER_IP}/docs"
+    echo "  NOTE        : Self-signed — accept browser security warning"
+    echo "  Cert expires: in 365 days — re-run this script to renew"
+fi
 echo ""
-echo "  1. Edit the .env file with real values:"
-echo "       nano $DEPLOY_DIR/.env"
-echo "       (change SECRET_KEY to something random)"
-echo ""
-echo "  2. Generate SSH key for GitHub Actions auto-deploy:"
-echo "       ssh-keygen -t ed25519 -C 'github-actions' -f ~/.ssh/github_deploy -N ''"
-echo "       cat ~/.ssh/github_deploy.pub  → GitHub repo > Settings > Deploy keys"
-echo "       cat ~/.ssh/github_deploy      → GitHub repo > Settings > Secrets > SERVER_SSH_KEY"
-echo ""
-echo "  3. Add these GitHub Secrets:"
-echo "       SERVER_HOST = $SERVER_IP"
-echo "       SERVER_USER = root"
-echo "       SERVER_PORT = 22"
-echo "       SERVER_SSH_KEY = (private key from step 2)"
-echo ""
-echo "  4. Start the API:"
-echo "       cd $DEPLOY_DIR && docker compose up -d"
-echo ""
-echo "  5. Verify:"
-echo "       curl http://$SERVER_IP/docs"
-echo ""
-echo "After step 2-3, every git push to main auto-deploys!"
-
