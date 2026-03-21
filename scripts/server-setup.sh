@@ -116,7 +116,7 @@ echo "[6/7] Creating .env template..."
 if [ ! -f ".env" ]; then
   cat > .env <<EOF
 SECRET_KEY=CHANGE_ME_STRONG_SECRET_KEY_HERE
-ALLOWED_ORIGINS=http://${SERVER_IP},http://${SERVER_IP}:3000,http://localhost:3000
+ALLOWED_ORIGINS=https://www.chartap.com,https://chartap.com,http://localhost:3000
 DATABASE_URL=postgresql+asyncpg://chartap:chartap@db:5432/chartap
 REDIS_URL=redis://redis:6379/0
 CELERY_BROKER_URL=redis://redis:6379/1
