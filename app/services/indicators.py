@@ -32,6 +32,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df["bb_mid"]   = bb.get("BBM_20_2.0")
         df["bb_lower"] = bb.get("BBL_20_2.0")
 
+    macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
+    if macd is not None:
+        df["macd"]        = macd.get("MACD_12_26_9")
+        df["macd_signal"] = macd.get("MACDs_12_26_9")
+        df["macd_hist"]   = macd.get("MACDh_12_26_9")
+
+    df["rsi"] = ta.rsi(df["close"], length=14)
+
     df["ema_20"] = ta.ema(df["close"], length=20)
     df["ema_50"] = ta.ema(df["close"], length=50)
 

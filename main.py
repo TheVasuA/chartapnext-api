@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import create_tables
-from app.routers import coins, ws, smc, rsi
+from app.routers import coins, ws, smc, rsi, breakout, signals
 from app.services.binance_ws import BinanceWSManager
 
 binance_manager = BinanceWSManager()
@@ -39,7 +39,9 @@ app.add_middleware(
 app.include_router(coins.router,   prefix="/coins",   tags=["coins"])
 app.include_router(smc.router,     prefix="/smc",     tags=["smc"])
 app.include_router(rsi.router,     prefix="/rsi",     tags=["rsi"])
+app.include_router(signals.router, prefix="/signals", tags=["signals"])
 app.include_router(ws.router,                         tags=["websocket"])
+app.include_router(breakout.router, prefix="/breakout", tags=["breakout"])
 
 
 @app.get("/health", tags=["health"])
