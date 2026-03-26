@@ -17,19 +17,8 @@ BREAKOUT_KEY = "breakout:{symbol}"
 BREAKOUT_TTL = 300
 
 
-async def _list_or_compute_breakout() -> list[dict]:
-    """Return cached breakout analyses, computing and caching on first miss."""
-    redis = await get_redis()
-    pipe = redis.pipeline()
-    for sym in SYMBOLS:
-        pipe.get(BREAKOUT_KEY.format(symbol=sym))
-    raw = await pipe.execute()
-
-    cached = [json.loads(r) for r in raw if r]
-    if cached:
-        return cached
-
-    # Cache is cold: compute once so frontend doesn't get an empty list forever.
+async def _compute_and_cache_breakout(redis) -> list[dict]:
+    """Compute breakout analyses for all symbols and persist to Redis."""
     computed: list[dict] = []
     for sym in SYMBOLS:
         try:
@@ -50,6 +39,26 @@ async def _list_or_compute_breakout() -> list[dict]:
         await write_pipe.execute()
 
     return computed
+
+
+async def _list_or_compute_breakout(require_directional: bool = False) -> list[dict]:
+    """Return cached breakout analyses; optionally force refresh if no LONG/SHORT."""
+    redis = await get_redis()
+    pipe = redis.pipeline()
+    for sym in SYMBOLS:
+        pipe.get(BREAKOUT_KEY.format(symbol=sym))
+    raw = await pipe.execute()
+
+    cached = [json.loads(r) for r in raw if r]
+    if cached:
+        has_directional = any(r.get("signal") in {"LONG", "SHORT"} for r in cached)
+        if not require_directional or has_directional:
+            return cached
+        logger.info("Breakout cache contains only WAIT signals, refreshing")
+        return await _compute_and_cache_breakout(redis)
+
+    # Cache is cold: compute once so frontend doesn't get an empty list forever.
+    return await _compute_and_cache_breakout(redis)
 
 class Candle(BaseModel):
     t: int  # timestamp
@@ -73,14 +82,14 @@ async def list_breakout():
 @router.get("/signals/long", response_model=List[dict])
 async def breakout_long_signals():
     """Return only LONG breakout signals."""
-    rows = await _list_or_compute_breakout()
+    rows = await _list_or_compute_breakout(require_directional=True)
     return [r for r in rows if r.get("signal") == "LONG"]
 
 
 @router.get("/signals/short", response_model=List[dict])
 async def breakout_short_signals():
     """Return only SHORT breakout signals."""
-    rows = await _list_or_compute_breakout()
+    rows = await _list_or_compute_breakout(require_directional=True)
     return [r for r in rows if r.get("signal") == "SHORT"]
 
 

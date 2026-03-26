@@ -74,7 +74,7 @@ async def run_breakout_strategy(symbol: str) -> Optional[dict]:
         else:
             colors.append("gray")
 
-    consolidation_min = 6
+    consolidation_min = 4
     consolidation_count = 0
     in_consolidation = False
 
@@ -86,7 +86,7 @@ async def run_breakout_strategy(symbol: str) -> Optional[dict]:
 
     for i in range(20, len(candles)):
         price = float(candles[i]["close"])
-        near_ema = abs(price - ema25[i]) < (atr_vals[i] * 0.5)
+        near_ema = abs(price - ema25[i]) < (atr_vals[i] * 0.7)
 
         if colors[i] == "gray" or near_ema:
             consolidation_count += 1
@@ -101,20 +101,20 @@ async def run_breakout_strategy(symbol: str) -> Optional[dict]:
             prev_high = max(float(c["high"]) for c in prev_slice)
             prev_low = min(float(c["low"]) for c in prev_slice)
 
-            strong_bull = float(candles[i]["close"]) > prev_high
-            strong_bear = float(candles[i]["close"]) < prev_low
+            # Slightly relaxed breakout test: close beyond range OR strong candle body through range edge.
+            c_open = float(candles[i]["open"])
+            c_close = float(candles[i]["close"])
+            c_high = float(candles[i]["high"])
+            c_low = float(candles[i]["low"])
 
-            prev_lows_10 = [float(c["low"]) for c in candles[i - 10 : i]]
-            prev_highs_10 = [float(c["high"]) for c in candles[i - 10 : i]]
-
-            sweep_low = float(candles[i]["low"]) < min(prev_lows_10)
-            sweep_high = float(candles[i]["high"]) > max(prev_highs_10)
+            strong_bull = c_close > prev_high or (c_high > prev_high and c_close > c_open)
+            strong_bear = c_close < prev_low or (c_low < prev_low and c_close < c_open)
 
             atr_window = atr_vals[i - 20 : i]
             avg_atr = sum(atr_window) / len(atr_window)
-            volatility = atr_vals[i] > avg_atr
+            volatility = atr_vals[i] >= avg_atr * 0.9
 
-            if trend_up and strong_bull and sweep_low and volatility and colors[i] == "green":
+            if trend_up and strong_bull and volatility and colors[i] == "green":
                 if signal_idx is None or signal_idx != i - 1:
                     last_signal = "LONG"
                     signal_idx = i
@@ -125,7 +125,7 @@ async def run_breakout_strategy(symbol: str) -> Optional[dict]:
                     in_consolidation = False
                     continue
 
-            if trend_down and strong_bear and sweep_high and volatility and colors[i] == "red":
+            if trend_down and strong_bear and volatility and colors[i] == "red":
                 if signal_idx is None or signal_idx != i - 1:
                     last_signal = "SHORT"
                     signal_idx = i
@@ -138,6 +138,34 @@ async def run_breakout_strategy(symbol: str) -> Optional[dict]:
 
         consolidation_count = 0
         in_consolidation = False
+
+    # Fallback mode: if no strict breakout was found, emit a directional
+    # momentum signal so the feed does not stay empty.
+    if last_signal == "WAIT":
+        last_price = float(candles[-1]["close"])
+        last_open = float(candles[-1]["open"])
+        trend_up_now = ema25[-1] > ema99[-1]
+        trend_down_now = ema25[-1] < ema99[-1]
+        bull_body = last_price > last_open
+        bear_body = last_price < last_open
+        atr_guard = atr_vals[-1] * 0.2
+
+        if trend_up_now and colors[-1] == "green" and last_price >= ema25[-1] - atr_guard and bull_body:
+            last_signal = "LONG"
+            signal_idx = len(candles) - 1
+            lookback = candles[-6:-1] if len(candles) >= 6 else candles[:-1]
+            if lookback:
+                breakout_high = max(float(c["high"]) for c in lookback)
+                breakout_low = min(float(c["low"]) for c in lookback)
+            signal_color = colors[-1]
+        elif trend_down_now and colors[-1] == "red" and last_price <= ema25[-1] + atr_guard and bear_body:
+            last_signal = "SHORT"
+            signal_idx = len(candles) - 1
+            lookback = candles[-6:-1] if len(candles) >= 6 else candles[:-1]
+            if lookback:
+                breakout_high = max(float(c["high"]) for c in lookback)
+                breakout_low = min(float(c["low"]) for c in lookback)
+            signal_color = colors[-1]
 
     ts_idx = signal_idx if signal_idx is not None else len(candles) - 1
     ts = datetime.fromtimestamp(int(candles[ts_idx]["open_time"]) / 1000, tz=timezone.utc).isoformat()
