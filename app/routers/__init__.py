@@ -3,3 +3,4 @@ from .ws import *
 from .smc import *
 from .rsi import *
 from .breakout import *
+from .scalping import *

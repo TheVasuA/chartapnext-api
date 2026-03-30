@@ -29,6 +29,11 @@ celery_app.conf.update(
     timezone          = "UTC",
     enable_utc        = True,
     beat_schedule     = {
+        # Consolidation breakout scanner every 2 minutes (scalping signals)
+        "refresh-scalping-signals-every-2-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_scalping_signals",
+            "schedule": 120.0,
+        },
             # Breakout strategy signals every 5 minutes
             "refresh-all-breakout-every-5-minutes": {
                 "task":     "app.tasks.signal_tasks.refresh_all_breakout",
@@ -198,4 +203,33 @@ def refresh_all_rsi(self):
         raise self.retry(exc=exc, countdown=15)
 
 
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_scalping_signals",
+    bind=True,
+    max_retries=3,
+)
+def refresh_scalping_signals(self):
+    """Scan 60 symbols × 4 timeframes for EMA25 consolidation breakouts and
+    cache the full signal list in Redis under key 'scalping:signals'."""
+    from app.redis_client import get_redis
+    from app.services.scalping_strategy import run_scalping_scan
+    import json
+    import time
+
+    async def _scan():
+        signals = await run_scalping_scan()
+        redis   = await get_redis()
+        payload = json.dumps({
+            "signals":      signals,
+            "scannedCount": 60,
+            "timestamp":    int(time.time() * 1000),
+        })
+        await redis.set("scalping:signals", payload, ex=300)   # 5 min TTL
+        logger.info("refresh_scalping_signals: %d signals cached", len(signals))
+
+    try:
+        _run(_scan())
+    except Exception as exc:
+        logger.error("refresh_scalping_signals failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)
 
