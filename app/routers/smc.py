@@ -1,20 +1,18 @@
 """
 SMC endpoints.
 
-GET  /smc/              — latest SMC analysis for ALL symbols (from Redis cache)
-GET  /smc/{symbol}      — live SMC analysis for ONE symbol (computed on-demand)
-GET  /smc/signals/long  — only LONG signals
-GET  /smc/signals/short — only SHORT signals
+Free   — list/long/short cache reads
+Pro    — per-symbol on-demand recompute (heavy SMC engine)
 """
 
-import asyncio
 import json
 import logging
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.redis_client import get_redis
+from app.services.auth import require_plan
 from app.services.smc_strategy import run_smc_strategy
 from app.utils.symbols import SYMBOLS
 
@@ -22,7 +20,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 SMC_KEY = "smc:{symbol}"
-SMC_TTL = 300   # 5 minutes — SMC is 15M timeframe, no need to spam
+SMC_TTL = 300
 
 
 @router.get("/", response_model=List[dict])
@@ -38,7 +36,6 @@ async def list_smc():
 
 @router.get("/signals/long", response_model=List[dict])
 async def long_signals():
-    """Return only LONG signals."""
     redis = await get_redis()
     pipe  = redis.pipeline()
     for sym in SYMBOLS:
@@ -49,7 +46,6 @@ async def long_signals():
 
 @router.get("/signals/short", response_model=List[dict])
 async def short_signals():
-    """Return only SHORT signals."""
     redis = await get_redis()
     pipe  = redis.pipeline()
     for sym in SYMBOLS:
@@ -59,12 +55,11 @@ async def short_signals():
 
 
 @router.get("/{symbol}", response_model=dict)
-async def get_smc(symbol: str):
-    """Compute and cache SMC analysis for a single symbol."""
+async def get_smc(symbol: str, _principal=Depends(require_plan("pro"))):
+    """Compute and cache SMC analysis for a single symbol. (pro)"""
     sym   = symbol.upper()
     redis = await get_redis()
 
-    # Return from cache if fresh
     cached = await redis.get(SMC_KEY.format(symbol=sym))
     if cached:
         return json.loads(cached)

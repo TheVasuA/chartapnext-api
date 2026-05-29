@@ -14,12 +14,21 @@ class Settings(BaseSettings):
     # Plain str — avoids pydantic-settings v2 JSON-parsing List fields from env
     ALLOWED_ORIGINS: str = "http://localhost:3000"
 
+    # ── Auth (read directly via os.getenv in app.services.auth, declared
+    #         here so pydantic-settings doesn't reject them as extras) ──
+    BACKEND_JWT_SECRET: str = ""
+    DISABLE_AUTH: str = ""
+
     @property
     def allowed_origins_list(self) -> list[str]:
         """Split comma-separated origins into a list."""
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 settings = Settings()

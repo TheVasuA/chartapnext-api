@@ -1,19 +1,18 @@
 """
 RSI Pullback Strategy endpoints.
 
-GET  /rsi/              — latest RSI analysis for ALL symbols (from Redis cache)
-GET  /rsi/signals/long  — only LONG signals
-GET  /rsi/signals/short — only SHORT signals
-GET  /rsi/{symbol}      — live RSI analysis for ONE symbol (computed on-demand)
+Free   — list/long/short cache reads (cheap)
+Basic  — per-symbol on-demand recompute (heavy)
 """
 
 import json
 import logging
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.redis_client import get_redis
+from app.services.auth import require_plan
 from app.services.rsi_strategy import run_rsi_strategy
 from app.utils.symbols import SYMBOLS
 
@@ -26,7 +25,7 @@ RSI_TTL = 300   # 5 minutes
 
 @router.get("/", response_model=List[dict])
 async def list_rsi():
-    """Return the latest cached RSI analysis for all symbols."""
+    """Return the latest cached RSI analysis for all symbols. (free)"""
     redis = await get_redis()
     pipe  = redis.pipeline()
     for sym in SYMBOLS:
@@ -37,7 +36,7 @@ async def list_rsi():
 
 @router.get("/signals/long", response_model=List[dict])
 async def long_signals():
-    """Return only LONG RSI pullback signals."""
+    """Return only LONG RSI pullback signals. (free)"""
     redis = await get_redis()
     pipe  = redis.pipeline()
     for sym in SYMBOLS:
@@ -48,7 +47,7 @@ async def long_signals():
 
 @router.get("/signals/short", response_model=List[dict])
 async def short_signals():
-    """Return only SHORT RSI pullback signals."""
+    """Return only SHORT RSI pullback signals. (free)"""
     redis = await get_redis()
     pipe  = redis.pipeline()
     for sym in SYMBOLS:
@@ -58,8 +57,8 @@ async def short_signals():
 
 
 @router.get("/{symbol}", response_model=dict)
-async def get_rsi(symbol: str):
-    """Compute and cache RSI pullback analysis for a single symbol."""
+async def get_rsi(symbol: str, _principal=Depends(require_plan("basic"))):
+    """Compute and cache RSI pullback analysis for a single symbol. (basic+)"""
     sym   = symbol.upper()
     redis = await get_redis()
 
