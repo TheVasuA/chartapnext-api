@@ -6,20 +6,29 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import create_tables
-from app.routers import coins, ws, smc, rsi, breakout, signals, scalping
+from app.routers import coins, ws, smc, rsi, breakout, signals, scalping, patterns
 from app.services.binance_ws import BinanceWSManager
+from app.services.rate_limit import RateLimitMiddleware
 
-binance_manager = BinanceWSManager()
+# When True, the api process *also* runs the Binance ingestor in its lifespan.
+# In production we run a dedicated `ingestor` container instead, so this
+# toggle stays False there. Default True for single-container dev setups.
+import os
+RUN_BINANCE_IN_API = os.getenv("RUN_BINANCE_IN_API", "1") == "1"
+
+binance_manager = BinanceWSManager() if RUN_BINANCE_IN_API else None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await create_tables()
-    asyncio.create_task(binance_manager.start())
+    if binance_manager is not None:
+        asyncio.create_task(binance_manager.start())
     yield
     # Shutdown
-    await binance_manager.stop()
+    if binance_manager is not None:
+        await binance_manager.stop()
 
 
 app = FastAPI(
@@ -35,6 +44,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimitMiddleware)
 
 app.include_router(coins.router,   prefix="/coins",   tags=["coins"])
 app.include_router(smc.router,     prefix="/smc",     tags=["smc"])
@@ -43,6 +53,7 @@ app.include_router(signals.router, prefix="/signals", tags=["signals"])
 app.include_router(ws.router,                         tags=["websocket"])
 app.include_router(breakout.router,  prefix="/breakout",  tags=["breakout"])
 app.include_router(scalping.router,  prefix="/scalping",  tags=["scalping"])
+app.include_router(patterns.router,  prefix="/patterns",  tags=["patterns"])
 
 
 @app.get("/health", tags=["health"])

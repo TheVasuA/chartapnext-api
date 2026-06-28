@@ -151,7 +151,55 @@ Response:
 ]
 ```
 
+## Chart Patterns (classic formations)
+
+Detected with swing/pivot detection (`scipy.signal.find_peaks`) + geometric
+rules. Patterns: `double_top`, `double_bottom`, `head_shoulders`,
+`inverse_head_shoulders`, `ascending_triangle`, `descending_triangle`,
+`symmetrical_triangle`, `rising_wedge`, `falling_wedge`, `bull_flag`,
+`bear_flag`, `resistance_break`, `support_break`.
+
+Refreshed every 5 min (1h timeframe) by Celery beat. `interval` query param
+accepts `1h` (default) or `4h`.
+
+### GET /patterns/?interval=1h
+Full cached docs (incl. candle `window`) for symbols with detected patterns.
+
+### GET /patterns/signals?interval=1h
+Lightweight feed — the single best pattern per symbol, sorted by confidence.
+Includes the candle `window` so a snapshot can be drawn client-side.
+
+Response item shape:
+```json
+{
+  "symbol": "NEARUSDT",
+  "interval": "1h",
+  "timestamp": 1711451500000,
+  "pattern": "double_bottom",
+  "label": "Double Bottom",
+  "direction": "bullish",
+  "status": "confirmed",
+  "confidence": 0.78,
+  "price": 2.41,
+  "entry": 2.45,
+  "target": 2.71,
+  "stop": 2.30,
+  "risk_reward": 2.36,
+  "markers": [{ "i": 12, "price": 2.30, "kind": "trough", "label": "Bottom 1" }],
+  "lines":   [{ "from": [12, 2.45], "to": [89, 2.45], "kind": "neckline", "label": "Neckline" }],
+  "levels":  [{ "price": 2.45, "kind": "entry", "label": "Entry (break)" }],
+  "window":  { "interval": "1h", "candles": [{ "t": 1711450000000, "o": 2.4, "h": 2.42, "l": 2.39, "c": 2.41 }] }
+}
+```
+`markers[].i` and `lines[].from[0]` are positions into `window.candles`.
+`direction` ∈ `bullish | bearish | neutral`; `status` ∈ `forming | confirmed`.
+
+### GET /patterns/{symbol}?interval=1h
+On-demand recompute for one symbol (**Basic+**). Returns `{ symbol, interval,
+timestamp, patterns: [...], window }`. `503` if insufficient data.
+
 ## WebSocket
+
 
 ### WS /ws/signals
 Streams all generic signal updates from Redis pub/sub channel `signals`.

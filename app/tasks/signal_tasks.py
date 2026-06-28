@@ -54,6 +54,12 @@ celery_app.conf.update(
             "task":     "app.tasks.signal_tasks.refresh_all_signals",
             "schedule": 120.0,
         },
+        # Classic chart patterns (double top/bottom, H&S, triangles, flags,
+        # S/R break+retest) every 5 minutes on the 1h timeframe.
+        "refresh-all-patterns-every-5-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_all_patterns",
+            "schedule": 300.0,
+        },
     },
 )
 
@@ -231,5 +237,38 @@ def refresh_scalping_signals(self):
         _run(_scan())
     except Exception as exc:
         logger.error("refresh_scalping_signals failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)
+
+
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_all_patterns",
+    bind=True,
+    max_retries=3,
+)
+def refresh_all_patterns(self):
+    """Detect classic chart patterns for all symbols (1h) and cache results."""
+    from app.redis_client import get_redis
+    from app.services.pattern_detection import run_pattern_scan
+    from app.utils.symbols import SYMBOLS
+    import json
+
+    async def _compute_all():
+        redis = await get_redis()
+        for symbol in SYMBOLS:
+            try:
+                result = await run_pattern_scan(symbol, interval="1h")
+                if result:
+                    await redis.set(
+                        f"patterns:{symbol}:1h",
+                        json.dumps(result),
+                        ex=900,
+                    )
+            except Exception as exc:
+                logger.error("Error computing patterns for %s: %s", symbol, exc)
+
+    try:
+        _run(_compute_all())
+    except Exception as exc:
+        logger.error("refresh_all_patterns failed: %s", exc)
         raise self.retry(exc=exc, countdown=15)
 

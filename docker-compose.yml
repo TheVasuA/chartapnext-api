@@ -1,4 +1,8 @@
 services:
+  # ─────────── HTTP / WS API ───────────
+  # uvicorn workers carry both REST and WebSocket traffic. With 100
+  # concurrent users (mostly idle WS subscribers), 4 workers per replica
+  # is plenty — async I/O does the heavy lifting.
   api:
     build: .
     ports:
@@ -11,13 +15,66 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       BACKEND_JWT_SECRET: ${BACKEND_JWT_SECRET}
       DISABLE_AUTH: ${DISABLE_AUTH:-}
+      # The ingestor service owns the Binance WS connection.
+      RUN_BINANCE_IN_API: "0"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    # uvicorn flags tuned for ~100 concurrent users:
+    #   --workers 4              parallelism for CPU-bound paths (json, indicators)
+    #   --backlog 2048           pending connections before kernel queues spill
+    #   --limit-concurrency 1000 cap to avoid OOM on a runaway client
+    #   --timeout-keep-alive 30  keep TCP open for WS upgrades & polling
+    #   --proxy-headers          honour X-Forwarded-* from nginx
+    #   --forwarded-allow-ips=*  trust the docker network proxy hop
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0 --port 8000
+      --workers 4
+      --backlog 2048
+      --limit-concurrency 1000
+      --timeout-keep-alive 30
+      --proxy-headers --forwarded-allow-ips=*
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1500M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
+  # ─────────── Binance ingestor (single instance) ───────────
+  # Owns the websocket to Binance. Writes ticks/candles to Redis.
+  # NEVER scale this past 1 replica — Binance enforces a per-IP stream
+  # limit and Redis writes would race.
+  ingestor:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://chartap:chartap@db:5432/chartap
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python ingestor.py
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 400M
+
+  # ─────────── Celery worker ───────────
   worker:
     build: .
     env_file: .env
@@ -29,8 +86,23 @@ services:
     depends_on:
       - db
       - redis
-    command: celery -A celery_worker.celery_app worker --loglevel=info --concurrency=4
+    # --concurrency 4         OK for I/O bound strategy refresh tasks
+    # --max-tasks-per-child   recycle worker process to plug pandas leaks
+    # --time-limit            kill anything that runs longer than 5 min
+    command: >
+      celery -A celery_worker.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --max-tasks-per-child=100
+      --time-limit=300 --soft-time-limit=240
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1200M
 
+  # ─────────── Celery beat (scheduler) ───────────
   beat:
     build: .
     env_file: .env
@@ -43,32 +115,73 @@ services:
       - db
       - redis
     command: celery -A celery_worker.celery_app beat --loglevel=info
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
 
+  # ─────────── Postgres ───────────
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: chartap
       POSTGRES_PASSWORD: chartap
       POSTGRES_DB: chartap
+    # Tuning for a small VPS:
+    #   max_connections=100   matches our app pool ceilings
+    #   shared_buffers=256MB  ~25% of RAM for the db service
+    #   effective_cache=768MB hint for the planner
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c work_mem=8MB
+      -c maintenance_work_mem=64MB
+      -c synchronous_commit=off
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chartap"]
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
 
+  # ─────────── Redis ───────────
+  # maxmemory + LFU keeps it bounded; persistence is best-effort because
+  # everything in Redis can be re-derived from Postgres or Binance.
   redis:
     image: redis:7-alpine
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lfu
+      --tcp-keepalive 60
+      --save ""
+      --appendonly no
     ports:
       - "6379:6379"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 600M
 
 volumes:
   postgres_data:

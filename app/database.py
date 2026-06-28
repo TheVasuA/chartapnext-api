@@ -6,13 +6,22 @@ from sqlalchemy.pool import NullPool
 
 from app.config import settings
 
-# Shared engine for the FastAPI app (uses connection pool)
+# Per-worker pool. With 4 uvicorn workers we want pool_size + max_overflow
+# to stay below Postgres max_connections / num_workers, with headroom for
+# the celery worker pool too.
+#
+#   4 api workers * (5 + 5) = 40
+#   1 celery worker * (4 concurrency + a few) ~= 8
+#   --------------------------------------------
+#   ~50 connections, well under Postgres max_connections=100.
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=5,
+    max_overflow=5,
+    pool_recycle=300,
+    pool_timeout=10,
 )
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)

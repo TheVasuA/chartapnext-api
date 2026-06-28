@@ -4,45 +4,64 @@ WebSocket endpoints — push live signals to the Next.js frontend.
 /ws/signals           — receive signals for ALL symbols  (Pro only)
 /ws/signals/{symbol}  — receive signals for ONE symbol   (Pro only)
 
-Redis pub/sub channel "signals" is the single source of truth.
+A single in-process broadcaster (`signal_broadcaster.broadcaster`) keeps
+exactly one Redis pubsub subscription open and fans messages out to
+every connected client via per-client asyncio queues. This keeps Redis
+load constant regardless of concurrent WS user count.
 """
 
-import json
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.redis_client import get_redis
 from app.services.auth import ws_require_plan
+from app.services.signal_broadcaster import broadcaster, parse
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+async def _stream(websocket: WebSocket, symbol: str | None):
+    queue = await broadcaster.subscribe()
+    try:
+        while True:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Heartbeat keeps proxies (nginx, ingress) from idle-killing the conn
+                try:
+                    await websocket.send_text('{"type":"ping"}')
+                except Exception:
+                    break
+                continue
+
+            if symbol:
+                data = parse(payload)
+                if not data or data.get("symbol") != symbol:
+                    continue
+            try:
+                await websocket.send_text(payload)
+            except Exception:
+                break
+    finally:
+        await broadcaster.unsubscribe(queue)
+
+
 @router.websocket("/ws/signals")
 async def ws_all_signals(websocket: WebSocket):
-    # Auth first — the helper closes the socket on failure.
     try:
         principal = await ws_require_plan(websocket, "pro")
     except Exception:
         return
-
     await websocket.accept()
-    redis  = await get_redis()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe("signals")
-    logger.info("WS client connected (all symbols) user=%s", principal.id)
+    logger.info("WS connected (all) user=%s", principal.id)
     try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                await websocket.send_text(message["data"])
+        await _stream(websocket, None)
     except WebSocketDisconnect:
-        logger.info("WS client disconnected (all symbols)")
-    except Exception as exc:
-        logger.error("WS error: %s", exc)
+        pass
     finally:
-        await pubsub.unsubscribe("signals")
-        await pubsub.aclose()
+        logger.info("WS disconnected (all) user=%s", principal.id)
 
 
 @router.websocket("/ws/signals/{symbol}")
@@ -51,21 +70,12 @@ async def ws_symbol_signals(websocket: WebSocket, symbol: str):
         principal = await ws_require_plan(websocket, "pro")
     except Exception:
         return
-
     await websocket.accept()
-    redis  = await get_redis()
-    pubsub = redis.pubsub()
-    await pubsub.subscribe("signals")
     sym = symbol.upper()
-    logger.info("WS client connected (%s) user=%s", sym, principal.id)
+    logger.info("WS connected (%s) user=%s", sym, principal.id)
     try:
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                data = json.loads(message["data"])
-                if data.get("symbol") == sym:
-                    await websocket.send_text(message["data"])
+        await _stream(websocket, sym)
     except WebSocketDisconnect:
-        logger.info("WS client disconnected (%s)", sym)
+        pass
     finally:
-        await pubsub.unsubscribe("signals")
-        await pubsub.aclose()
+        logger.info("WS disconnected (%s) user=%s", sym, principal.id)
