@@ -6,7 +6,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8005:8005"
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://chartap:chartap@db:5432/chartap
@@ -35,7 +35,7 @@ services:
     #   --forwarded-allow-ips=*  trust the docker network proxy hop
     command: >
       uvicorn main:app
-      --host 0.0.0.0 --port 8000
+      --host 0.0.0.0 --port 8005
       --workers 4
       --backlog 2048
       --limit-concurrency 1000
@@ -48,7 +48,7 @@ services:
           memory: 1500M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8005/health',timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -1,6 +1,6 @@
 # Chartapnext API Contract
 
-Base URL (local): `http://localhost:8000`
+Base URL (local): `http://localhost:8005`
 
 ## Health
 
