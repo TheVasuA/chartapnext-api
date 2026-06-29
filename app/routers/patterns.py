@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 KEY = "patterns:{symbol}:{interval}"
 TTL = 900
 DEFAULT_INTERVAL = "1h"
-ALLOWED_INTERVALS = {"1h", "4h"}
+ALLOWED_INTERVALS = {"15m", "1h", "4h"}
 
 
 def _norm_interval(interval: str) -> str:

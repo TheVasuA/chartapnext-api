@@ -55,6 +55,19 @@ class PatternConfig:
     sr_min_touches: int = 3
     flat_slope: float = 0.0006      # |slope/price| per bar considered "flat"
 
+    # ── Quality filters (added for higher-probability, higher-profit signals) ──
+    atr_period: int = 14            # ATR window for volatility-aware stops
+    atr_stop_mult: float = 1.2      # min stop distance = atr_stop_mult × ATR
+    vol_lookback: int = 20          # bars to average volume over
+    vol_confirm_ratio: float = 1.5  # breakout-bar volume ≥ this × avg ⇒ confirmed
+    min_risk_reward: float = 1.5    # drop setups whose R:R is below this
+    min_confidence: float = 0.45    # drop low-quality detections
+    # Confidence blend weights (geometry / volume / trend / momentum)
+    w_geometry: float = 0.45
+    w_volume: float = 0.25
+    w_trend: float = 0.18
+    w_momentum: float = 0.12
+
 
 CFG = PatternConfig()
 
@@ -548,6 +561,200 @@ def detect_sr_retest(highs, lows, closes, peaks, troughs, n, cfg) -> Optional[di
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Quality scoring — volume, trend, momentum, ATR stops, R:R filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class MarketContext:
+    atr: float            # latest ATR (price units)
+    vol_ratio: float      # last-bar volume / average volume
+    vol_rising: bool      # volume trending up into the breakout
+    trend: str            # 'up' | 'down' | 'side'  (EMA20 vs EMA50)
+    rsi: float            # latest RSI(14)
+
+
+def _ema(arr: np.ndarray, length: int) -> float:
+    if len(arr) < length:
+        return float(arr[-1]) if len(arr) else 0.0
+    k = 2 / (length + 1)
+    e = float(arr[0])
+    for v in arr[1:]:
+        e = float(v) * k + e * (1 - k)
+    return e
+
+
+def _atr(highs, lows, closes, period: int) -> float:
+    n = len(closes)
+    if n < 2:
+        return 0.0
+    trs = []
+    for i in range(1, n):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+    period = min(period, len(trs))
+    return float(np.mean(trs[-period:])) if trs else 0.0
+
+
+def _rsi(closes: np.ndarray, period: int = 14) -> float:
+    if len(closes) <= period:
+        return 50.0
+    diff = np.diff(closes)
+    gains = np.where(diff > 0, diff, 0.0)
+    losses = np.where(diff < 0, -diff, 0.0)
+    avg_gain = np.mean(gains[-period:])
+    avg_loss = np.mean(losses[-period:])
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return float(100 - 100 / (1 + rs))
+
+
+def build_context(highs, lows, closes, volumes, cfg: PatternConfig) -> MarketContext:
+    atr = _atr(highs, lows, closes, cfg.atr_period)
+    if volumes is not None and len(volumes) >= cfg.vol_lookback + 1:
+        avg_vol = float(np.mean(volumes[-cfg.vol_lookback - 1:-1])) or 1e-12
+        vol_ratio = float(volumes[-1]) / avg_vol
+        first_half = float(np.mean(volumes[-cfg.vol_lookback:-cfg.vol_lookback // 2]))
+        second_half = float(np.mean(volumes[-cfg.vol_lookback // 2:]))
+        vol_rising = second_half >= first_half
+    else:
+        vol_ratio, vol_rising = 1.0, False
+
+    ema_fast = _ema(closes[-50:], 20)
+    ema_slow = _ema(closes[-50:], 50)
+    last = float(closes[-1])
+    if ema_fast > ema_slow and last >= ema_slow:
+        trend = "up"
+    elif ema_fast < ema_slow and last <= ema_slow:
+        trend = "down"
+    else:
+        trend = "side"
+
+    return MarketContext(atr=atr, vol_ratio=vol_ratio, vol_rising=vol_rising,
+                         trend=trend, rsi=_rsi(closes, 14))
+
+
+# Patterns that act as trend *continuation* (should align with prevailing trend)
+_CONTINUATION = {
+    "ascending_triangle", "descending_triangle", "symmetrical_triangle",
+    "bull_flag", "bear_flag", "resistance_break", "support_break",
+}
+
+
+def _quality_grade(conf: float) -> str:
+    if conf >= 0.75:
+        return "A"
+    if conf >= 0.6:
+        return "B"
+    return "C"
+
+
+def enrich_and_filter(patterns: List[dict], ctx: MarketContext, cfg: PatternConfig) -> List[dict]:
+    """Re-score each detected pattern with volume / trend / momentum / ATR,
+    widen too-tight stops to an ATR floor, recompute R:R, and drop setups that
+    don't clear the minimum R:R and confidence bars. This is what turns raw
+    geometric hits into higher-probability, higher-profit signals."""
+    out: List[dict] = []
+    for p in patterns:
+        direction = p.get("direction")
+        entry = p.get("entry")
+        target = p.get("target")
+        stop = p.get("stop")
+        reasons: List[str] = []
+
+        # 1) Volatility-aware stop: never tighter than atr_stop_mult × ATR.
+        if entry and stop and ctx.atr > 0 and direction in ("bullish", "bearish"):
+            min_dist = cfg.atr_stop_mult * ctx.atr
+            if abs(entry - stop) < min_dist:
+                stop = entry - min_dist if direction == "bullish" else entry + min_dist
+                p["stop"] = round(float(stop), 8)
+                reasons.append("Stop widened to ATR floor")
+
+        # Recompute R:R after stop adjustment.
+        rr = None
+        if entry and stop and target and abs(entry - stop) > 1e-12:
+            rr = round(abs(target - entry) / abs(entry - stop), 2)
+            p["risk_reward"] = rr
+
+        # 2) Volume confirmation.
+        vol_score = max(0.0, min(ctx.vol_ratio / cfg.vol_confirm_ratio, 1.0))
+        if ctx.vol_ratio >= cfg.vol_confirm_ratio:
+            reasons.append(f"Volume {ctx.vol_ratio:.1f}× avg")
+        elif ctx.vol_ratio < 0.8:
+            reasons.append("Low volume — weak confirmation")
+        if ctx.vol_rising:
+            vol_score = min(1.0, vol_score + 0.1)
+
+        # 3) Trend alignment.
+        is_cont = p.get("pattern") in _CONTINUATION
+        trend_score = 0.5
+        if direction == "bullish":
+            if ctx.trend == "up":
+                trend_score = 1.0
+                reasons.append("Aligned with uptrend")
+            elif ctx.trend == "down" and is_cont:
+                trend_score = 0.15
+                reasons.append("Against trend")
+        elif direction == "bearish":
+            if ctx.trend == "down":
+                trend_score = 1.0
+                reasons.append("Aligned with downtrend")
+            elif ctx.trend == "up" and is_cont:
+                trend_score = 0.15
+                reasons.append("Against trend")
+
+        # 4) Momentum (RSI): reward room-to-run, penalise exhaustion.
+        mom_score = 0.5
+        if direction == "bullish":
+            if 45 <= ctx.rsi <= 68:
+                mom_score = 1.0
+            elif ctx.rsi > 78:
+                mom_score = 0.2
+                reasons.append("RSI overbought")
+        elif direction == "bearish":
+            if 32 <= ctx.rsi <= 55:
+                mom_score = 1.0
+            elif ctx.rsi < 22:
+                mom_score = 0.2
+                reasons.append("RSI oversold")
+
+        base = float(p.get("confidence", 0.5))
+        conf = (
+            cfg.w_geometry * base
+            + cfg.w_volume * vol_score
+            + cfg.w_trend * trend_score
+            + cfg.w_momentum * mom_score
+        )
+        if p.get("status") == "confirmed":
+            conf = min(1.0, conf + 0.08)
+        conf = max(0.0, min(1.0, conf))
+
+        # Annotate.
+        p["confidence"] = round(conf, 2)
+        p["quality"] = _quality_grade(conf)
+        p["volume_ratio"] = round(ctx.vol_ratio, 2)
+        p["volume_confirmed"] = ctx.vol_ratio >= cfg.vol_confirm_ratio
+        p["trend"] = ctx.trend
+        p["rsi"] = round(ctx.rsi, 1)
+        p["atr"] = round(ctx.atr, 8)
+        p["reasons"] = reasons
+
+        # 5) Hard filters — only high-probability, high-profit setups survive.
+        if rr is not None and rr < cfg.min_risk_reward:
+            continue
+        if conf < cfg.min_confidence:
+            continue
+        out.append(p)
+
+    out.sort(key=lambda x: x["confidence"], reverse=True)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -580,6 +787,7 @@ async def run_pattern_scan(symbol: str, interval: str = "1h", limit: int = 200) 
     highs = df["high"].to_numpy(dtype=float)
     lows = df["low"].to_numpy(dtype=float)
     closes = df["close"].to_numpy(dtype=float)
+    volumes = df["volume"].to_numpy(dtype=float) if "volume" in df else None
     n = len(closes)
 
     peaks, troughs = find_swings(highs, lows, CFG)
@@ -594,7 +802,10 @@ async def run_pattern_scan(symbol: str, interval: str = "1h", limit: int = 200) 
         except Exception as exc:  # never let one detector kill the scan
             logger.debug("%s failed for %s/%s: %s", detector.__name__, symbol, interval, exc)
 
-    found.sort(key=lambda x: x["confidence"], reverse=True)
+    # Re-score with volume / trend / momentum / ATR and keep only the
+    # high-probability, high-R:R setups.
+    ctx = build_context(highs, lows, closes, volumes, CFG)
+    found = enrich_and_filter(found, ctx, CFG)
 
     return {
         "symbol": symbol,

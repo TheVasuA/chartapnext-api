@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import create_tables
-from app.routers import coins, ws, smc, rsi, breakout, signals, scalping, patterns
+from app.routers import coins, ws, smc, rsi, breakout, signals, scalping, patterns, mtf, swing
 from app.services.binance_ws import BinanceWSManager
 from app.services.rate_limit import RateLimitMiddleware
 
@@ -54,6 +54,8 @@ app.include_router(ws.router,                         tags=["websocket"])
 app.include_router(breakout.router,  prefix="/breakout",  tags=["breakout"])
 app.include_router(scalping.router,  prefix="/scalping",  tags=["scalping"])
 app.include_router(patterns.router,  prefix="/patterns",  tags=["patterns"])
+app.include_router(mtf.router,       prefix="/mtf",       tags=["mtf"])
+app.include_router(swing.router,     prefix="/swing",     tags=["swing"])
 
 
 @app.get("/health", tags=["health"])

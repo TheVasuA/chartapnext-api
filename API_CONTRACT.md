@@ -154,13 +154,16 @@ Response:
 ## Chart Patterns (classic formations)
 
 Detected with swing/pivot detection (`scipy.signal.find_peaks`) + geometric
-rules. Patterns: `double_top`, `double_bottom`, `head_shoulders`,
+rules, then **re-scored for quality**: volume confirmation, EMA trend
+alignment, RSI momentum, ATR-based stops, and a minimum risk:reward filter
+(only setups with R:R ≥ 1.5 and confidence ≥ 0.45 are emitted). Patterns:
+`double_top`, `double_bottom`, `head_shoulders`,
 `inverse_head_shoulders`, `ascending_triangle`, `descending_triangle`,
 `symmetrical_triangle`, `rising_wedge`, `falling_wedge`, `bull_flag`,
 `bear_flag`, `resistance_break`, `support_break`.
 
-Refreshed every 5 min (1h timeframe) by Celery beat. `interval` query param
-accepts `1h` (default) or `4h`.
+Refreshed every 5 min across `15m`, `1h`, and `4h` by Celery beat. `interval`
+query param accepts `15m`, `1h` (default), or `4h`.
 
 ### GET /patterns/?interval=1h
 Full cached docs (incl. candle `window`) for symbols with detected patterns.
@@ -180,6 +183,13 @@ Response item shape:
   "direction": "bullish",
   "status": "confirmed",
   "confidence": 0.78,
+  "quality": "A",
+  "volume_ratio": 1.8,
+  "volume_confirmed": true,
+  "trend": "up",
+  "rsi": 58.2,
+  "atr": 0.031,
+  "reasons": ["Volume 1.8× avg", "Aligned with uptrend"],
   "price": 2.41,
   "entry": 2.45,
   "target": 2.71,
@@ -197,6 +207,87 @@ Response item shape:
 ### GET /patterns/{symbol}?interval=1h
 On-demand recompute for one symbol (**Basic+**). Returns `{ symbol, interval,
 timestamp, patterns: [...], window }`. `503` if insufficient data.
+
+## Multi-Timeframe Confluence (RSI + MA + MACD)
+
+Top-down confluence across 4H (bias) / 1H (setup) / 15M (trigger). Each
+timeframe scores MA / MACD / RSI; combined into a 0–100 confidence
+(4H 40% / 1H 35% / 15M 25%), gated by ADX and an RSI-exhaustion guard,
+with ATR-based SL/TP. Refreshed every 3 min; cached `mtf:{symbol}`.
+
+### GET /mtf/
+Latest cached confluence for all symbols.
+
+### GET /mtf/signals/long  ·  GET /mtf/signals/short
+Only LONG / SHORT signals, sorted by confidence.
+
+Response item shape:
+```json
+{
+  "symbol": "BCHUSDT",
+  "signal": "LONG",
+  "confidence": 79.2,
+  "price": 512.3,
+  "entry": 512.3,
+  "target": 524.1,
+  "stop": 506.4,
+  "risk_reward": 2.0,
+  "atr_1h": 3.9,
+  "adx_4h": 27.1,
+  "adx_1h": 22.4,
+  "timeframes": [
+    { "tf": "4h",  "bias": "bull", "ma": "bull", "macd": "bull", "rsi": 61.2, "rsi_state": "bull", "adx": 27.1 },
+    { "tf": "1h",  "bias": "bull", "ma": "bull", "macd": "bull", "rsi": 58.0, "rsi_state": "bull", "adx": 22.4 },
+    { "tf": "15m", "bias": "bull", "ma": "bull", "macd": "bull", "rsi": 55.4, "rsi_state": "bull", "adx": 19.0 }
+  ],
+  "timestamp": "2026-06-29T10:00:00+00:00"
+}
+```
+`signal` ∈ `LONG | SHORT | WAIT`; each timeframe's `ma/macd/rsi_state` ∈ `bull | bear | neutral`.
+
+### GET /mtf/{symbol}
+On-demand recompute for one symbol (**Basic+**). `503` if insufficient data.
+
+## Swing Confluence (Dynamic Trend Matrix · 4H + 15M)
+
+Ports the "Uptrick: Dynamic Trend Matrix" trend engine (fast/base/slow EMA
+stack + slope + ATR-band trail) to two timeframes. A signal fires **only when
+both agree**: `LONG` (Buy) when 4H trend up AND 15M trigger up; `SHORT` (Sell)
+when both down; else `WAIT`. Risk/TP levels come from the 15M trail (1×/2×/3×
+risk). Refreshed every 3 min; cached `swing:{symbol}`.
+
+### GET /swing/
+Latest cached swing analysis for all symbols.
+
+### GET /swing/signals/long  ·  GET /swing/signals/short
+Only LONG / SHORT signals, sorted by confidence.
+
+Response item shape:
+```json
+{
+  "symbol": "BTCUSDT",
+  "signal": "LONG",
+  "price": 67890.12,
+  "confidence": 72.4,
+  "entry": 67890.12,
+  "stop": 66950.0,
+  "tp1": 68830.0,
+  "tp2": 69770.0,
+  "tp3": 70710.0,
+  "risk_reward": 2.0,
+  "bias_4h": "up",
+  "trigger_15m": "up",
+  "strength_4h": 0.61,
+  "strength_15m": 0.54,
+  "confirmed": true,
+  "trail_15m": 66950.0,
+  "timestamp": "2026-06-29T10:00:00+00:00"
+}
+```
+`signal` ∈ `LONG | SHORT | WAIT`; `bias_4h`/`trigger_15m` ∈ `up | down | flat`.
+
+### GET /swing/{symbol}
+On-demand recompute for one symbol (**Basic+**). `503` if insufficient data.
 
 ## WebSocket
 

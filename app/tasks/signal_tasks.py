@@ -60,6 +60,16 @@ celery_app.conf.update(
             "task":     "app.tasks.signal_tasks.refresh_all_patterns",
             "schedule": 300.0,
         },
+        # Multi-timeframe RSI+MA+MACD confluence (4h/1h/15m) every 3 minutes.
+        "refresh-all-mtf-every-3-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_all_mtf",
+            "schedule": 180.0,
+        },
+        # Swing confluence — Dynamic Trend Matrix on 4h + 15m every 3 minutes.
+        "refresh-all-swing-every-3-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_all_swing",
+            "schedule": 180.0,
+        },
     },
 )
 
@@ -246,9 +256,45 @@ def refresh_scalping_signals(self):
     max_retries=3,
 )
 def refresh_all_patterns(self):
-    """Detect classic chart patterns for all symbols (1h) and cache results."""
+    """Detect classic chart patterns for all symbols across 15m/1h/4h and cache."""
     from app.redis_client import get_redis
     from app.services.pattern_detection import run_pattern_scan
+    from app.utils.symbols import SYMBOLS
+    import json
+
+    intervals = ("15m", "1h", "4h")
+
+    async def _compute_all():
+        redis = await get_redis()
+        for symbol in SYMBOLS:
+            for interval in intervals:
+                try:
+                    result = await run_pattern_scan(symbol, interval=interval)
+                    if result:
+                        await redis.set(
+                            f"patterns:{symbol}:{interval}",
+                            json.dumps(result),
+                            ex=900,
+                        )
+                except Exception as exc:
+                    logger.error("Error computing patterns for %s/%s: %s", symbol, interval, exc)
+
+    try:
+        _run(_compute_all())
+    except Exception as exc:
+        logger.error("refresh_all_patterns failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)
+
+
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_all_mtf",
+    bind=True,
+    max_retries=3,
+)
+def refresh_all_mtf(self):
+    """Recompute 4h/1h/15m RSI+MA+MACD confluence for all symbols and cache."""
+    from app.redis_client import get_redis
+    from app.services.mtf_strategy import run_mtf_strategy
     from app.utils.symbols import SYMBOLS
     import json
 
@@ -256,19 +302,44 @@ def refresh_all_patterns(self):
         redis = await get_redis()
         for symbol in SYMBOLS:
             try:
-                result = await run_pattern_scan(symbol, interval="1h")
+                result = await run_mtf_strategy(symbol)
                 if result:
-                    await redis.set(
-                        f"patterns:{symbol}:1h",
-                        json.dumps(result),
-                        ex=900,
-                    )
+                    await redis.set(f"mtf:{symbol}", json.dumps(result), ex=600)
             except Exception as exc:
-                logger.error("Error computing patterns for %s: %s", symbol, exc)
+                logger.error("Error computing MTF for %s: %s", symbol, exc)
 
     try:
         _run(_compute_all())
     except Exception as exc:
-        logger.error("refresh_all_patterns failed: %s", exc)
+        logger.error("refresh_all_mtf failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)
+
+
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_all_swing",
+    bind=True,
+    max_retries=3,
+)
+def refresh_all_swing(self):
+    """Recompute 4h+15m Dynamic Trend Matrix confluence for all symbols."""
+    from app.redis_client import get_redis
+    from app.services.swing_strategy import run_swing_strategy
+    from app.utils.symbols import SYMBOLS
+    import json
+
+    async def _compute_all():
+        redis = await get_redis()
+        for symbol in SYMBOLS:
+            try:
+                result = await run_swing_strategy(symbol)
+                if result:
+                    await redis.set(f"swing:{symbol}", json.dumps(result), ex=600)
+            except Exception as exc:
+                logger.error("Error computing swing for %s: %s", symbol, exc)
+
+    try:
+        _run(_compute_all())
+    except Exception as exc:
+        logger.error("refresh_all_swing failed: %s", exc)
         raise self.retry(exc=exc, countdown=15)
 
