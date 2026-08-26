@@ -34,6 +34,11 @@ celery_app.conf.update(
             "task":     "app.tasks.signal_tasks.refresh_scalping_signals",
             "schedule": 120.0,
         },
+        # Consolidation breakout with Telegram alerts every 3 minutes
+        "refresh-consolidation-signals-every-3-minutes": {
+            "task":     "app.tasks.signal_tasks.refresh_consolidation_signals",
+            "schedule": 180.0,
+        },
             # Breakout strategy signals every 5 minutes
             "refresh-all-breakout-every-5-minutes": {
                 "task":     "app.tasks.signal_tasks.refresh_all_breakout",
@@ -343,3 +348,65 @@ def refresh_all_swing(self):
         logger.error("refresh_all_swing failed: %s", exc)
         raise self.retry(exc=exc, countdown=15)
 
+
+
+@celery_app.task(
+    name="app.tasks.signal_tasks.refresh_consolidation_signals",
+    bind=True,
+    max_retries=3,
+)
+def refresh_consolidation_signals(self):
+    """Scan consolidation breakouts and broadcast new signals via Telegram."""
+    from app.redis_client import get_redis
+    from app.services.scalping_strategy import run_scalping_scan
+    from app.services.telegram_service import broadcast_signals_batch
+    import json
+    import time
+
+    async def _scan_and_notify():
+        signals = await run_scalping_scan()
+        redis = await get_redis()
+
+        # Load previous signals to detect NEW ones
+        prev_raw = await redis.get("consolidation:signals")
+        prev_symbols_tf = set()
+        if prev_raw:
+            prev_data = json.loads(prev_raw)
+            for s in prev_data.get("signals", []):
+                prev_symbols_tf.add(f"{s['symbol']}:{s.get('timeframe')}")
+
+        # Identify new signals (not in previous scan)
+        new_signals = [
+            s for s in signals
+            if f"{s['symbol']}:{s.get('timeframe')}" not in prev_symbols_tf
+        ]
+
+        # Cache the full result
+        payload = json.dumps({
+            "signals": signals,
+            "scannedCount": 60,
+            "timestamp": int(time.time() * 1000),
+        })
+        await redis.set("consolidation:signals", payload, ex=300)
+
+        # Broadcast NEW signals to Telegram subscribers
+        if new_signals:
+            subs_raw = await redis.hgetall("consolidation:telegram_subscribers")
+            chat_ids = [
+                cid if isinstance(cid, str) else cid.decode()
+                for cid in subs_raw.keys()
+            ]
+            if chat_ids:
+                sent = await broadcast_signals_batch(new_signals, chat_ids)
+                logger.info(
+                    "consolidation: %d new signals → Telegram (%d chats, %d sent)",
+                    len(new_signals), len(chat_ids), sent,
+                )
+
+        logger.info("refresh_consolidation_signals: %d total, %d new", len(signals), len(new_signals))
+
+    try:
+        _run(_scan_and_notify())
+    except Exception as exc:
+        logger.error("refresh_consolidation_signals failed: %s", exc)
+        raise self.retry(exc=exc, countdown=15)

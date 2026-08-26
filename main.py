@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import create_tables
-from app.routers import coins, ws, smc, rsi, breakout, signals, scalping, patterns, mtf, swing
+from app.routers import coins, ws, smc, rsi, breakout, signals, scalping, patterns, mtf, swing, consolidation
 from app.services.binance_ws import BinanceWSManager
 from app.services.rate_limit import RateLimitMiddleware
 
@@ -56,6 +56,7 @@ app.add_middleware(RateLimitMiddleware)
 _CACHEABLE_PREFIXES = (
     "/signals", "/smc", "/rsi", "/breakout",
     "/scalping", "/patterns", "/mtf", "/swing",
+    "/consolidation",
 )
 
 
@@ -88,6 +89,7 @@ app.include_router(scalping.router,  prefix="/scalping",  tags=["scalping"])
 app.include_router(patterns.router,  prefix="/patterns",  tags=["patterns"])
 app.include_router(mtf.router,       prefix="/mtf",       tags=["mtf"])
 app.include_router(swing.router,     prefix="/swing",     tags=["swing"])
+app.include_router(consolidation.router, prefix="/consolidation", tags=["consolidation"])
 
 
 @app.get("/health", tags=["health"])
